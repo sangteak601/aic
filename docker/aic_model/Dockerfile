@@ -1,28 +1,38 @@
-FROM docker.io/library/ros:kilted-ros-core AS build
+FROM ros:kilted-ros-base
 
-# Install pixi
-RUN apt update && apt install -y git && curl -fsSL https://pixi.sh/install.sh | bash
-ENV PATH="/root/.pixi/bin:$PATH"
+# Install dependencies
+RUN mkdir -p /ws_aic/src/aic
+COPY --chmod=644 aic.repos /ws_aic/src/aic/
+COPY --chmod=u=rwX,go=rX --parents **/package.xml /ws_aic/src/aic
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked --mount=type=cache,target=/var/lib/apt,sharing=locked \
+  apt update && apt upgrade -y && \
+  # undeclared deps
+  apt install python3-numpy && \
+  # Install ROS dependencies using rosdep.
+  cd /ws_aic && \
+  rosdep install --from-paths src --ignore-src --rosdistro kilted -yr --skip-keys "gz-cmake3 DART libogre-dev libogre-next-2.3-dev"
 
-# Add base dependencies
-COPY aic_example_policies /ws_aic/src/aic/aic_example_policies
-COPY aic_model /ws_aic/src/aic/aic_model
-COPY aic_interfaces /ws_aic/src/aic/aic_interfaces
-COPY aic_utils /ws_aic/src/aic/aic_utils
-COPY pixi.toml pixi.lock /ws_aic/src/aic/
-COPY pixi_env_setup.sh /ws_aic/src/aic/
+# Build the workspace
+COPY --chmod=u=rwX,go=rX --exclude=docker . /ws_aic/src/aic
+SHELL ["/bin/bash", "-c"]
+RUN --mount=type=cache,target=/ws_aic/build,sharing=locked \
+  cd /ws_aic \
+  && . /opt/ros/kilted/setup.bash \
+  && GZ_BUILD_FROM_SOURCE=1 colcon build --cmake-args -DCMAKE_BUILD_TYPE=Release --merge-install --executor sequential \
+  && rm -rf /ws_aic/log /ws_aic/src
 
 # Add other dependencies
 
 SHELL ["/bin/bash", "-c"]
-RUN --mount=type=cache,target=/root/.cache/rattler/cache --mount=type=cache,target=/ws_aic/src/aic/.pixi/build \
-    cd /ws_aic/src/aic && pixi install --locked
+# RUN --mount=type=cache,target=/root/.cache/rattler/cache --mount=type=cache,target=/ws_aic/src/aic/.pixi/build \
+#     cd /ws_aic/src/aic && pixi install --locked
 
 WORKDIR /ws_aic/src/aic
 COPY --chmod=755 <<"EOF" /entrypoint.sh
 #!/bin/bash
 set -e
 
+. /ws_aic/install/setup.bash
 export RMW_IMPLEMENTATION=rmw_zenoh_cpp
 
 if [[ -z "$AIC_ROUTER_ADDR" ]]; then
@@ -53,8 +63,7 @@ if should_enable_acl; then
 fi
 export ZENOH_CONFIG_OVERRIDE
 echo "ZENOH_CONFIG_OVERRIDE=$ZENOH_CONFIG_OVERRIDE"
-exec pixi run --as-is ros2 run aic_model aic_model "$@"
+exec ros2 run aic_model aic_model "$@"
 EOF
 
 ENTRYPOINT ["/entrypoint.sh"]
-CMD ["--ros-args", "-p", "policy:=aic_example_policies.ros.CheatCode"]
